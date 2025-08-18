@@ -1,16 +1,25 @@
 device: "cuda"
 
 dataset:
-  name: "breastmnist"
+  name: "pathmnist"
   split_ratio: 0.8
   img_size: 28
-  grayscale: true
 
 augmentation:
   k: 4.0
   alpha: 0.05
   seed: 42
-  ops: ["op_brightness", "op_contrast", "op_flip", "op_hue", "op_rotate", "op_saturation", "op_scale", "op_translate"]
+  ops:
+    [
+      "op_brightness",
+      "op_contrast",
+      "op_flip",
+      "op_hue",
+      "op_rotate",
+      "op_saturation",
+      "op_scale",
+      "op_translate",
+    ]
 
 training:
   model: resnet18

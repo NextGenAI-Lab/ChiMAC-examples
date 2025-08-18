@@ -1,10 +1,9 @@
 device: "cuda"
 
 dataset:
-  name: "breastmnist"
+  name: "pathmnist"
   split_ratio: 0.8
   img_size: 28
-  grayscale: true
 
 training:
   model: resnet18
@@ -16,7 +15,7 @@ training:
 logging:
   wandb_project: "chimac-benchmark"
   wandb_entity: "runs-nsut"
-  log_interval: 10
+  log_interval: 100
 
 system_monitor:
   interval_sec: 1

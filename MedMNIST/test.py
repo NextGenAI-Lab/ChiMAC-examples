@@ -25,7 +25,7 @@ from chimac.utils import (
     op_scale,
     op_translate,
 )
-from medmnist import INFO, Evaluator
+from medmnist import INFO
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -85,30 +85,60 @@ def make_log_filename(cfg: dict) -> str:
     return f"{stamp}_{cfg['dataset']['name']}-{cfg['training']['model']}-{cfg['dataset']['img_size']}{aug_tag}.log"
 
 
-def build_model(model_name: str, num_classes: int, device: torch.device) -> nn.Module:
+def build_model(model_name: str, num_classes: int, device: torch.device, grayscale: bool = False) -> nn.Module:
     if not hasattr(models, model_name):
         raise ValueError(f"Model '{model_name}' not found in torchvision.models")
 
     model_fn = getattr(models, model_name)
+
+    # initialize model
     if "num_classes" in signature(model_fn).parameters:
         model = model_fn(num_classes=num_classes)
     else:
         model = model_fn()
-        # common replacements for final classification layer
+
+        # replace classifier / fc head
         if hasattr(model, "fc") and isinstance(model.fc, nn.Linear):
             model.fc = nn.Linear(model.fc.in_features, num_classes)
         elif hasattr(model, "classifier"):
-            # some models have classifier as Sequential or Linear
             if isinstance(model.classifier, nn.Linear):
                 model.classifier = nn.Linear(model.classifier.in_features, num_classes)
             else:
-                # try replacing last layer of classifier sequential
                 try:
                     last_idx = len(model.classifier) - 1
                     in_feat = model.classifier[last_idx].in_features
                     model.classifier[last_idx] = nn.Linear(in_feat, num_classes)
                 except Exception:
                     pass
+
+    # if grayscale, adjust first conv
+    if grayscale:
+        first_layer_name = None
+        # common naming in torchvision models
+        for name in ["conv1", "features.0"]:
+            if hasattr(model, name):
+                first_layer_name = name
+                break
+
+        if first_layer_name is None:
+            raise RuntimeError("Couldn't find first conv layer to modify for grayscale input")
+
+        first_conv = getattr(model, first_layer_name)
+        if isinstance(first_conv, nn.Conv2d) and first_conv.in_channels == 3:
+            # create new conv with 1 channel
+            new_conv = nn.Conv2d(
+                in_channels=1,
+                out_channels=first_conv.out_channels,
+                kernel_size=first_conv.kernel_size, # type: ignore
+                stride=first_conv.stride, # type: ignore
+                padding=first_conv.padding, # type: ignore
+                bias=first_conv.bias is not None,
+            )
+            # optional: average pretrained RGB weights for grayscale
+            with torch.no_grad():
+                new_conv.weight[:] = first_conv.weight.mean(dim=1, keepdim=True)
+            setattr(model, first_layer_name, new_conv)
+
     return model.to(device)
 
 
@@ -257,7 +287,7 @@ def train_loop(
             running_loss += float(loss.item()) * inputs.size(0)
             batch_count += inputs.size(0)
 
-            probs = torch.softmax(outputs, dim=1).cpu().numpy()
+            probs = torch.softmax(outputs, dim=1).cpu().detach().numpy()
             preds = outputs.argmax(dim=1).cpu().numpy()
 
             all_targets.extend(targets.cpu().numpy().tolist())
@@ -318,9 +348,9 @@ def train_loop(
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            ckpt_path = Path("best_model.pth")
-            torch.save(model.state_dict(), ckpt_path)
-            logger.info(f"Saved best checkpoint to {ckpt_path}")
+            # ckpt_path = Path("best_model.pth")
+            # torch.save(model.state_dict(), ckpt_path)
+            # logger.info(f"Saved best checkpoint to {ckpt_path}")
         else:
             patience_counter += 1
             logger.info(f"Patience {patience_counter}/{patience}")
@@ -391,6 +421,7 @@ def main(cfg: dict):
             else 42
         ),
         logger=logger,
+        deterministic=False,
     )
 
     # device
@@ -406,6 +437,7 @@ def main(cfg: dict):
         wandb.init(
             project=cfg["logging"]["wandb_project"],
             entity=cfg["logging"].get("wandb_entity"),
+            name=log_filename,
             config=cfg,
         )
         logger.info("WandB initialized")
@@ -420,7 +452,7 @@ def main(cfg: dict):
 
     # transforms & augmentation
     if "augmentation" in cfg:
-        aug_ops = [globals()[op] for op in cfg["augmentation"]["ops"]]
+        aug_ops = [globals()[op]() for op in cfg["augmentation"]["ops"]]
         chimac = ChiMAC(
             aug_ops,
             k=cfg["augmentation"]["k"],
@@ -471,9 +503,12 @@ def main(cfg: dict):
         pin_memory=True,
     )
 
+    # are images grayscale
+    grayscale = cfg["dataset"].get("grayscale", False)
+
     # model, optimizer, loss
     model = build_model(
-        cfg["training"]["model"], num_classes=num_classes, device=device
+        cfg["training"]["model"], num_classes=num_classes, device=device, grayscale=grayscale
     )
     logger.info(
         f"Built model {cfg['training']['model']} with {sum(p.numel() for p in model.parameters())} params"
